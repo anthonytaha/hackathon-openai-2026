@@ -21,6 +21,7 @@ class SupabaseSettings:
     bucket: str
     input_prefix: str = ""
     output_prefix: str = "processed"
+    calls_table: str = "allo_calls"
 
     @classmethod
     def from_env(cls) -> "SupabaseSettings":
@@ -45,6 +46,8 @@ class SupabaseSettings:
             input_prefix=os.getenv("SUPABASE_INPUT_PREFIX", "").strip("/"),
             output_prefix=os.getenv("SUPABASE_OUTPUT_PREFIX", "processed").strip("/")
             or "processed",
+            calls_table=os.getenv("SUPABASE_CALLS_TABLE", "allo_calls").strip()
+            or "allo_calls",
         )
 
 

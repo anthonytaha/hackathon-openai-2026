@@ -17,12 +17,14 @@ app/
 │   └── processing_result.py        ProcessingResult and JobState contracts
 └── services/
     ├── pipeline_service.py         Dashboard adapter for the privacy pipeline
+    ├── supabase_calls.py           allo_calls query and call-ID/path mapping
     ├── supabase_storage.py         Storage listing/download/upload helpers
     ├── sms_client.py               Generic SMS HTTP client
     └── workflow_service.py         Upload-before-notification sequencing
 
 privacy_pipeline.py                 Whisper + privacy filter + FFmpeg core
-main.py                             FastAPI entry point
+main.py                             Streamlit entry point
+api.py                              FastAPI entry point
 tests/                              Unit tests with mocked integrations
 ```
 
@@ -65,6 +67,7 @@ cp .env.example .env
 SUPABASE_URL=
 SUPABASE_KEY=
 SUPABASE_AUDIO_BUCKET=
+SUPABASE_CALLS_TABLE=allo_calls
 SUPABASE_INPUT_PREFIX=
 SUPABASE_OUTPUT_PREFIX=processed
 
@@ -76,10 +79,11 @@ SMS_API_KEY=
 SMS_RECIPIENT=
 ```
 
-`PRIVACY_REDACTION_ACTION` accepts `beep` or `mute`. Supabase credentials are
-optional for local uploads. If configured, the dashboard uploads the processed
-artifacts and can send an SMS; otherwise local results remain available for
-download in the browser.
+`PRIVACY_REDACTION_ACTION` accepts `beep` or `mute`. `SUPABASE_CALLS_TABLE`
+defaults to `allo_calls` in the `public` schema. Supabase credentials are optional
+for local uploads. If configured, the dashboard uploads the processed artifacts
+and can send an SMS; otherwise local results remain available for download in the
+browser.
 
 Keep Supabase and SMS credentials server-side. They are never rendered by the UI,
 and the Storage bucket does not need to be public.
@@ -87,14 +91,17 @@ and the Storage bucket does not need to be public.
 ## Streamlit dashboard
 
 ```bash
-.venv/bin/streamlit run app/dashboard.py
+.venv/bin/streamlit run main.py
 ```
 
-Use **Local upload** to process an MP3 or WAV directly from your computer, or use
-**Supabase recordings** to browse configured storage. Listing retrieves metadata
-only. Processing, uploads, and SMS happen only after an explicit button click.
-Upload and SMS failures have stage-specific retry buttons, preventing Streamlit
-reruns from duplicating earlier side effects.
+Use **Local upload** to process an MP3 or WAV directly from your computer. The
+**Supabase calls** tab reads lightweight rows from `public.allo_calls`
+without retrieving the `payload` JSON. When `recording_path` is populated, it is
+used as the path inside `SUPABASE_AUDIO_BUCKET`. Otherwise the dashboard maps
+`call_id` to `<call_id>.mp3` below `SUPABASE_INPUT_PREFIX`. Selecting a call
+downloads only that recording. Processing, uploads, and SMS happen only after an
+explicit button click. Upload and SMS failures have stage-specific retry buttons,
+preventing Streamlit reruns from duplicating earlier side effects.
 
 Every processing attempt uses a unique temporary directory and UUID. Outputs are
 uploaded as:
@@ -114,7 +121,7 @@ accordingly.
 ## FastAPI service
 
 ```bash
-uvicorn main:app --reload
+uvicorn api:app --reload
 ```
 
 Upload the included fixture:

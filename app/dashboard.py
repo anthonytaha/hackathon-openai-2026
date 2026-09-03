@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+# Streamlit adds the script's directory, not always the repository root, to
+# sys.path when invoked as `streamlit run app/dashboard.py`.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -16,12 +23,11 @@ from dotenv import load_dotenv
 from app.models.processing_result import JobState
 from app.services.pipeline_service import process_audio
 from app.services.sms_client import SmsError, send_processing_complete_sms
+from app.services.supabase_calls import CallRecording, list_call_recordings
 from app.services.supabase_storage import (
-    StorageObject,
     SupabaseSettings,
     create_supabase_client,
     download_object,
-    list_mp3_objects,
 )
 from app.services.workflow_service import upload_processing_artifacts
 
@@ -52,6 +58,7 @@ def _get_client(url: str, key: str) -> Any:
 def _init_session() -> None:
     defaults: dict[str, Any] = {
         "recordings": None,
+        "recordings_source": None,
         "recordings_error": None,
         "preview_path": None,
         "preview_audio": None,
@@ -68,9 +75,13 @@ def _init_session() -> None:
 
 def _load_recordings(client: Any, settings: SupabaseSettings) -> None:
     try:
-        st.session_state.recordings = list_mp3_objects(
-            client, settings.bucket, settings.input_prefix
+        st.session_state.recordings = list_call_recordings(
+            client,
+            table=settings.calls_table,
+            bucket=settings.bucket,
+            input_prefix=settings.input_prefix,
         )
+        st.session_state.recordings_source = f"table:{settings.calls_table}"
         st.session_state.recordings_error = None
     except Exception as exc:
         LOGGER.exception("Supabase recording listing failed")
@@ -405,7 +416,7 @@ def main() -> None:
     except Exception as exc:
         supabase_error = str(exc)
 
-    source_tab, supabase_tab = st.tabs(["Local upload", "Supabase recordings"])
+    source_tab, supabase_tab = st.tabs(["Local upload", "Supabase calls"])
     with source_tab:
         st.header("1. Upload an audio file")
         uploaded_file = st.file_uploader("MP3 or WAV file", type=["mp3", "wav"])
@@ -427,44 +438,55 @@ def main() -> None:
                 )
 
     with supabase_tab:
-        st.header("1. Supabase recordings")
+        st.header(f"1. Supabase calls (public.{settings.calls_table if settings else 'allo_calls'})")
         if supabase_error:
             st.info("Configure Supabase to browse recordings and upload processed artifacts.")
             st.code(supabase_error)
         elif settings is not None and client is not None:
+            expected_source = f"table:{settings.calls_table}"
+            if st.session_state.recordings_source != expected_source:
+                st.session_state.recordings = None
+                st.session_state.recordings_error = None
+                st.session_state.recordings_source = expected_source
             refresh_col, filter_col = st.columns([1, 4])
             with refresh_col:
                 refresh = st.button("Refresh", use_container_width=True)
             with filter_col:
-                query = st.text_input("Filter by filename or path", placeholder="meeting.mp3")
+                query = st.text_input(
+                    "Filter by call ID, topic, status, or recording path",
+                    placeholder="call ID or topic",
+                )
 
             if st.session_state.recordings is None or refresh:
-                with st.spinner("Fetching MP3 objects…"):
+                with st.spinner(f"Fetching calls from public.{settings.calls_table}…"):
                     _load_recordings(client, settings)
             if st.session_state.recordings_error:
                 st.error(st.session_state.recordings_error)
 
-            recordings: list[StorageObject] = st.session_state.recordings or []
+            recordings: list[CallRecording] = st.session_state.recordings or []
             normalized_query = query.casefold().strip()
             filtered = [
                 item
                 for item in recordings
                 if not normalized_query
-                or normalized_query in item.name.casefold()
-                or normalized_query in item.path.casefold()
+                or normalized_query in item.call_id.casefold()
+                or normalized_query in item.topic.casefold()
+                or normalized_query in item.recording_status.casefold()
+                or normalized_query in item.object_path.casefold()
             ]
             if not recordings:
-                st.info("No MP3 files were found in the configured bucket and input prefix.")
+                st.info(f"No calls were found in public.{settings.calls_table}.")
             elif not filtered:
-                st.info("No MP3 files match the current filter.")
+                st.info("No calls match the current filter.")
             else:
                 st.dataframe(
                     [
                         {
-                            "Filename": item.name,
-                            "Storage object path": item.path,
-                            "File size": _friendly_size(item.size),
-                            "Modified": item.modified_at or "Unknown",
+                            "Call ID": item.call_id,
+                            "Topic": item.topic,
+                            "Recording status": item.recording_status,
+                            "Storage object path": item.object_path,
+                            "Received": item.received_at or "Unknown",
                         }
                         for item in filtered
                     ],
@@ -472,18 +494,30 @@ def main() -> None:
                     hide_index=True,
                 )
 
-                object_by_path = {item.path: item for item in filtered}
-                selected_path = st.selectbox(
-                    "Select one recording",
-                    options=list(object_by_path),
-                    format_func=lambda path: f"{object_by_path[path].name} — {path}",
+                call_by_id = {item.call_id: item for item in filtered}
+                selected_call_id = st.selectbox(
+                    "Select one call",
+                    options=list(call_by_id),
+                    format_func=lambda call_id: (
+                        f"{call_by_id[call_id].topic} — {call_id}"
+                        if call_by_id[call_id].topic
+                        else call_id
+                    ),
                 )
-                selected = object_by_path[selected_path]
+                selected = call_by_id[selected_call_id]
 
                 st.header("2. Selected recording")
-                st.write(f"Object path: `{selected.path}`")
+                detail_columns = st.columns(2)
+                detail_columns[0].write(f"**Call ID:** `{selected.call_id}`")
+                detail_columns[0].write(f"**Topic:** {selected.topic}")
+                detail_columns[1].write(
+                    f"**Recording status:** `{selected.recording_status}`"
+                )
+                detail_columns[1].write(
+                    f"**Object path:** `{selected.object_path}`"
+                )
                 with st.spinner("Loading audio preview…"):
-                    _load_preview(client, settings, selected.path)
+                    _load_preview(client, settings, selected.object_path)
                 if st.session_state.preview_error:
                     st.error(st.session_state.preview_error)
                 elif st.session_state.preview_audio:
@@ -498,7 +532,11 @@ def main() -> None:
                     disabled=process_disabled,
                     help="Starts one new job. Rerenders do not repeat it.",
                 ):
-                    _start_job(client=client, settings=settings, source_object_path=selected.path)
+                    _start_job(
+                        client=client,
+                        settings=settings,
+                        source_object_path=selected.object_path,
+                    )
 
     job: JobState | None = st.session_state.active_job
     if job is not None:
