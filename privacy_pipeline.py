@@ -110,15 +110,22 @@ class AudioPrivacyPipeline:
         except Exception as error:
             raise PipelineError(f"Privacy filter inference failed: {error}") from error
         entities = [DetectedEntity(label=str(item.get("entity_group", item.get("entity", "PII"))), text=text[int(item["start"]):int(item["end"])], start=int(item["start"]), end=int(item["end"]), score=float(item.get("score", 0))) for item in predictions if item.get("start") is not None and item.get("end") is not None and item["end"] > item["start"]]
-        return self._merge_entities(entities)
+        return self._merge_entities(entities, text)
 
     @staticmethod
-    def _merge_entities(entities: list[DetectedEntity]) -> list[DetectedEntity]:
+    def _merge_entities(entities: list[DetectedEntity], source_text: str) -> list[DetectedEntity]:
         merged: list[DetectedEntity] = []
         for entity in sorted(entities, key=lambda item: (item.start, item.end)):
             if merged and entity.start <= merged[-1].end:
                 previous = merged[-1]
-                merged[-1] = previous.model_copy(update={"end": max(previous.end, entity.end), "score": max(previous.score, entity.score)})
+                end = max(previous.end, entity.end)
+                merged[-1] = previous.model_copy(
+                    update={
+                        "end": end,
+                        "text": source_text[previous.start:end],
+                        "score": max(previous.score, entity.score),
+                    }
+                )
             else:
                 merged.append(entity)
         return merged

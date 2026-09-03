@@ -1,0 +1,29 @@
+{
+  "redacted_transcript": "Hello, I'm calling regarding your file. Just to confirm your details, are you[private_person] currently living at [private_address]? Yes, that's correct. Perfect, thank you. I can confirm that your request has been processed. You'll receive a confirmation email today. Great, thank you, thank you. Have a nice day.",
+  "entities": [
+    {
+      "label": "private_person",
+      "text": " Sophie Martin",
+      "start": 77,
+      "end": 91,
+      "score": 0.9999977350234985
+    },
+    {
+      "label": "private_address",
+      "text": "24 Rue de Lila's 75,012",
+      "start": 112,
+      "end": 141,
+      "score": 0.9999931454658508
+    }
+  ],
+  "redaction_ranges": [
+    {
+      "start": 4.58,
+      "end": 5.5200000000000005
+    },
+    {
+      "start": 6.7,
+      "end": 10.8
+    }
+  ]
+}
