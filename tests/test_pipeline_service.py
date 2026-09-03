@@ -69,13 +69,11 @@ def test_privacy_pipeline_adapter_creates_all_artifacts(tmp_path: Path, monkeypa
     assert result.warnings == []
 
 
-def test_pipeline_rejects_non_mp3_input(tmp_path: Path) -> None:
+def test_pipeline_accepts_wav_input(tmp_path: Path, monkeypatch) -> None:
     input_path = tmp_path / "sample.wav"
     input_path.write_bytes(b"audio")
+    monkeypatch.setattr(pipeline_service, "_PIPELINE", FakePrivacyPipeline())
 
-    try:
-        pipeline_service.process_audio(input_path, tmp_path / "output")
-    except ValueError as exc:
-        assert "MP3" in str(exc)
-    else:  # pragma: no cover - assertion guard
-        raise AssertionError("Expected a ValueError")
+    result = pipeline_service.process_audio(input_path, tmp_path / "output")
+
+    assert result.input_audio_path == input_path

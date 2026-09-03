@@ -11,6 +11,7 @@ from app.models.processing_result import ProcessingResult
 
 
 _PIPELINE: Any | None = None
+SUPPORTED_INPUT_SUFFIXES = frozenset({".mp3", ".wav"})
 
 
 def _get_pipeline() -> Any:
@@ -31,8 +32,8 @@ def process_audio(input_path: Path, output_dir: Path) -> ProcessingResult:
     output_dir = Path(output_dir)
     if not input_path.is_file():
         raise FileNotFoundError(f"Input audio does not exist: {input_path}")
-    if input_path.suffix.lower() != ".mp3":
-        raise ValueError("The pipeline accepts MP3 input files only.")
+    if input_path.suffix.lower() not in SUPPORTED_INPUT_SUFFIXES:
+        raise ValueError("The pipeline accepts MP3 and WAV input files only.")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     output_audio_path = output_dir / "processed.mp3"

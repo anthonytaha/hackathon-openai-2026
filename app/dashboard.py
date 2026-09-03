@@ -147,7 +147,11 @@ def _notify(job: JobState) -> None:
 
 
 def _start_job(
-    *, client: Any, settings: SupabaseSettings, source_object_path: str
+    *,
+    client: Any | None,
+    settings: SupabaseSettings | None,
+    source_object_path: str,
+    local_audio: bytes | None = None,
 ) -> None:
     """Perform side effects once, exclusively from the Process button callback path."""
 
@@ -171,9 +175,16 @@ def _start_job(
     try:
         with st.status("Processing recording…", expanded=True) as status:
             try:
-                st.write("Downloading MP3")
-                audio_bytes = download_object(client, settings.bucket, source_object_path)
-                input_path = work_dir / "input.mp3"
+                if local_audio is None:
+                    if client is None or settings is None:
+                        raise RuntimeError("Supabase is not configured")
+                    st.write("Downloading audio from Supabase")
+                    audio_bytes = download_object(client, settings.bucket, source_object_path)
+                else:
+                    st.write("Reading uploaded audio")
+                    audio_bytes = local_audio
+                suffix = Path(source_object_path).suffix.lower()
+                input_path = work_dir / f"input{suffix if suffix in {'.mp3', '.wav'} else '.mp3'}"
                 input_path.write_bytes(audio_bytes)
                 job.original_audio = audio_bytes
             except Exception as exc:
@@ -206,28 +217,32 @@ def _start_job(
                 LOGGER.exception("Job %s pipeline failed", job.job_id)
                 return
 
-            try:
-                job.status = "uploading"
-                st.write("Uploading processed files")
-                job.uploaded_artifacts = upload_processing_artifacts(
-                    client=client,
-                    bucket=settings.bucket,
-                    source_object_path=source_object_path,
-                    output_prefix=settings.output_prefix,
-                    job_id=job.job_id,
-                    result=result,
-                )
-                job.uploaded_output_path = job.uploaded_artifacts["processed.mp3"]
-            except Exception as exc:
-                job.status = "failed"
-                job.failed_stage = "upload"
-                job.error = str(exc)
-                status.update(label="Upload failed", state="error")
-                LOGGER.exception("Job %s upload failed", job.job_id)
-                return
+            if client is not None and settings is not None:
+                try:
+                    job.status = "uploading"
+                    st.write("Uploading processed files")
+                    job.uploaded_artifacts = upload_processing_artifacts(
+                        client=client,
+                        bucket=settings.bucket,
+                        source_object_path=source_object_path,
+                        output_prefix=settings.output_prefix,
+                        job_id=job.job_id,
+                        result=result,
+                    )
+                    job.uploaded_output_path = job.uploaded_artifacts["processed.mp3"]
+                except Exception as exc:
+                    job.status = "failed"
+                    job.failed_stage = "upload"
+                    job.error = str(exc)
+                    status.update(label="Upload failed", state="error")
+                    LOGGER.exception("Job %s upload failed", job.job_id)
+                    return
 
-            st.write("Calling SMS API")
-            _notify(job)
+                st.write("Calling SMS API")
+                _notify(job)
+            else:
+                job.sms_status = "skipped"
+                job.sms_detail = "Supabase is not configured; results are available for local download."
             job.status = "completed"
             job.completed_at = _utcnow()
             job.error = None
@@ -381,88 +396,113 @@ def main() -> None:
         "for private-data detection, and FFmpeg to redact matching audio spans."
     )
 
+    settings: SupabaseSettings | None = None
+    client: Any | None = None
+    supabase_error: str | None = None
     try:
         settings = SupabaseSettings.from_env()
         client = _get_client(settings.url, settings.key)
     except Exception as exc:
-        st.error(str(exc))
-        st.info("Copy `.env.example` to `.env`, fill in Supabase settings, and restart.")
-        return
+        supabase_error = str(exc)
 
-    st.header("1. Supabase recordings")
-    refresh_col, filter_col = st.columns([1, 4])
-    with refresh_col:
-        refresh = st.button("Refresh", use_container_width=True)
-    with filter_col:
-        query = st.text_input("Filter by filename or path", placeholder="meeting.mp3")
+    source_tab, supabase_tab = st.tabs(["Local upload", "Supabase recordings"])
+    with source_tab:
+        st.header("1. Upload an audio file")
+        uploaded_file = st.file_uploader("MP3 or WAV file", type=["mp3", "wav"])
+        if uploaded_file is not None:
+            uploaded_audio = uploaded_file.getvalue()
+            st.write(f"**Selected file:** `{uploaded_file.name}` · {_friendly_size(len(uploaded_audio))}")
+            st.audio(uploaded_audio, format="audio/wav" if uploaded_file.name.lower().endswith(".wav") else "audio/mpeg")
+            if st.button(
+                "Process uploaded file",
+                type="primary",
+                disabled=st.session_state.side_effect_in_progress,
+                help="Starts one new job. Rerenders do not repeat it.",
+            ):
+                _start_job(
+                    client=client,
+                    settings=settings,
+                    source_object_path=f"local-upload/{Path(uploaded_file.name).name}",
+                    local_audio=uploaded_audio,
+                )
 
-    if st.session_state.recordings is None or refresh:
-        with st.spinner("Fetching MP3 objects…"):
-            _load_recordings(client, settings)
-    if st.session_state.recordings_error:
-        st.error(st.session_state.recordings_error)
+    with supabase_tab:
+        st.header("1. Supabase recordings")
+        if supabase_error:
+            st.info("Configure Supabase to browse recordings and upload processed artifacts.")
+            st.code(supabase_error)
+        elif settings is not None and client is not None:
+            refresh_col, filter_col = st.columns([1, 4])
+            with refresh_col:
+                refresh = st.button("Refresh", use_container_width=True)
+            with filter_col:
+                query = st.text_input("Filter by filename or path", placeholder="meeting.mp3")
 
-    recordings: list[StorageObject] = st.session_state.recordings or []
-    normalized_query = query.casefold().strip()
-    filtered = [
-        item
-        for item in recordings
-        if not normalized_query
-        or normalized_query in item.name.casefold()
-        or normalized_query in item.path.casefold()
-    ]
-    if not recordings:
-        st.info("No MP3 files were found in the configured bucket and input prefix.")
-        return
-    if not filtered:
-        st.info("No MP3 files match the current filter.")
-        return
+            if st.session_state.recordings is None or refresh:
+                with st.spinner("Fetching MP3 objects…"):
+                    _load_recordings(client, settings)
+            if st.session_state.recordings_error:
+                st.error(st.session_state.recordings_error)
 
-    st.dataframe(
-        [
-            {
-                "Filename": item.name,
-                "Storage object path": item.path,
-                "File size": _friendly_size(item.size),
-                "Modified": item.modified_at or "Unknown",
-            }
-            for item in filtered
-        ],
-        use_container_width=True,
-        hide_index=True,
-    )
+            recordings: list[StorageObject] = st.session_state.recordings or []
+            normalized_query = query.casefold().strip()
+            filtered = [
+                item
+                for item in recordings
+                if not normalized_query
+                or normalized_query in item.name.casefold()
+                or normalized_query in item.path.casefold()
+            ]
+            if not recordings:
+                st.info("No MP3 files were found in the configured bucket and input prefix.")
+            elif not filtered:
+                st.info("No MP3 files match the current filter.")
+            else:
+                st.dataframe(
+                    [
+                        {
+                            "Filename": item.name,
+                            "Storage object path": item.path,
+                            "File size": _friendly_size(item.size),
+                            "Modified": item.modified_at or "Unknown",
+                        }
+                        for item in filtered
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
-    object_by_path = {item.path: item for item in filtered}
-    selected_path = st.selectbox(
-        "Select one recording",
-        options=list(object_by_path),
-        format_func=lambda path: f"{object_by_path[path].name} — {path}",
-    )
-    selected = object_by_path[selected_path]
+                object_by_path = {item.path: item for item in filtered}
+                selected_path = st.selectbox(
+                    "Select one recording",
+                    options=list(object_by_path),
+                    format_func=lambda path: f"{object_by_path[path].name} — {path}",
+                )
+                selected = object_by_path[selected_path]
 
-    st.header("2. Selected recording")
-    st.write(f"Object path: `{selected.path}`")
-    with st.spinner("Loading audio preview…"):
-        _load_preview(client, settings, selected.path)
-    if st.session_state.preview_error:
-        st.error(st.session_state.preview_error)
-    elif st.session_state.preview_audio:
-        st.audio(st.session_state.preview_audio, format="audio/mpeg")
+                st.header("2. Selected recording")
+                st.write(f"Object path: `{selected.path}`")
+                with st.spinner("Loading audio preview…"):
+                    _load_preview(client, settings, selected.path)
+                if st.session_state.preview_error:
+                    st.error(st.session_state.preview_error)
+                elif st.session_state.preview_audio:
+                    st.audio(st.session_state.preview_audio, format="audio/mpeg")
 
-    process_disabled = bool(
-        st.session_state.side_effect_in_progress or not st.session_state.preview_audio
-    )
-    if st.button(
-        "Process Recording",
-        type="primary",
-        disabled=process_disabled,
-        help="Starts one new job. Rerenders do not repeat it.",
-    ):
-        _start_job(client=client, settings=settings, source_object_path=selected.path)
+                process_disabled = bool(
+                    st.session_state.side_effect_in_progress or not st.session_state.preview_audio
+                )
+                if st.button(
+                    "Process Recording",
+                    type="primary",
+                    disabled=process_disabled,
+                    help="Starts one new job. Rerenders do not repeat it.",
+                ):
+                    _start_job(client=client, settings=settings, source_object_path=selected.path)
 
     job: JobState | None = st.session_state.active_job
     if job is not None:
-        if job.failed_stage == "upload" and job.processing_result is not None:
+        if job.failed_stage == "upload" and job.processing_result is not None and client is not None and settings is not None:
             if st.button("Retry upload and notification", key=f"retry-upload-{job.job_id}"):
                 _retry_upload(client, settings, job)
         if job.sms_status == "failed":

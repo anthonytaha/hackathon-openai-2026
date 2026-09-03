@@ -77,8 +77,9 @@ SMS_RECIPIENT=
 ```
 
 `PRIVACY_REDACTION_ACTION` accepts `beep` or `mute`. Supabase credentials are
-required for the dashboard. If SMS configuration is incomplete, processing and
-uploads still succeed and notification is shown as skipped.
+optional for local uploads. If configured, the dashboard uploads the processed
+artifacts and can send an SMS; otherwise local results remain available for
+download in the browser.
 
 Keep Supabase and SMS credentials server-side. They are never rendered by the UI,
 and the Storage bucket does not need to be public.
@@ -86,13 +87,14 @@ and the Storage bucket does not need to be public.
 ## Streamlit dashboard
 
 ```bash
-streamlit run app/dashboard.py
+.venv/bin/streamlit run app/dashboard.py
 ```
 
-Listing retrieves metadata only. Selecting one recording downloads it for preview.
-Processing, uploads, and SMS happen only after an explicit button click. Upload and
-SMS failures have stage-specific retry buttons, preventing Streamlit reruns from
-duplicating earlier side effects.
+Use **Local upload** to process an MP3 or WAV directly from your computer, or use
+**Supabase recordings** to browse configured storage. Listing retrieves metadata
+only. Processing, uploads, and SMS happen only after an explicit button click.
+Upload and SMS failures have stage-specific retry buttons, preventing Streamlit
+reruns from duplicating earlier side effects.
 
 Every processing attempt uses a unique temporary directory and UUID. Outputs are
 uploaded as:
