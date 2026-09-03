@@ -1,12 +1,12 @@
-# MP3 Transcription Workflow
+# Privacy-Aware MP3 Transcription Workflow
 
-A Streamlit operator dashboard that lists private MP3 recordings from Supabase
-Storage, previews a selected file, runs a deliberately isolated placeholder
-pipeline, uploads the resulting audio and transcript artifacts, and calls a
-provider-neutral SMS HTTP endpoint.
+This project combines a Streamlit operator dashboard with an audio privacy
+pipeline. It lists private MP3 recordings from Supabase Storage, transcribes a
+selected recording with Whisper, detects personal data with
+`openai/privacy-filter`, redacts the matching audio spans with FFmpeg, uploads the
+processed artifacts, and calls a provider-neutral SMS endpoint.
 
-The current transcript is demo text. No speech recognition, confidence score,
-speaker detection, timestamps, or language detection is performed.
+The same privacy pipeline is also available through a FastAPI service.
 
 ## Architecture
 
@@ -16,21 +16,38 @@ app/
 ├── models/
 │   └── processing_result.py        ProcessingResult and JobState contracts
 └── services/
-    ├── pipeline_service.py         Replaceable placeholder pipeline
+    ├── pipeline_service.py         Dashboard adapter for the privacy pipeline
     ├── supabase_storage.py         Storage listing/download/upload helpers
     ├── sms_client.py               Generic SMS HTTP client
     └── workflow_service.py         Upload-before-notification sequencing
-tests/                              Isolated unit tests with mocked integrations
+
+privacy_pipeline.py                 Whisper + privacy filter + FFmpeg core
+main.py                             FastAPI entry point
+tests/                              Unit tests with mocked integrations
 ```
 
-The dashboard consumes `ProcessingResult`, not a transcription SDK. Supabase and
-SMS details are isolated behind service functions. Job state is currently held in
-`st.session_state`; it could later be persisted to a `processing_jobs` Supabase
-table without changing the pipeline contract.
+The dashboard still consumes only `ProcessingResult`. Model-specific behavior is
+contained in `privacy_pipeline.py` and its adapter in
+`app/services/pipeline_service.py`.
+
+## Requirements
+
+- Python 3.13 or newer
+- FFmpeg available on `PATH`
+- Enough disk and memory for the configured Whisper and privacy-filter models
+
+Models download lazily on the first processing request.
 
 ## Installation
 
-Python 3.10 or newer is required.
+With `uv`:
+
+```bash
+uv sync
+source .venv/bin/activate
+```
+
+Or with standard Python packaging:
 
 ```bash
 python3 -m venv .venv
@@ -40,13 +57,9 @@ pip install -e '.[test]'
 
 ## Configuration
 
-Create a local environment file (it is ignored by Git):
-
 ```bash
 cp .env.example .env
 ```
-
-Configure these values:
 
 ```env
 SUPABASE_URL=
@@ -55,49 +68,34 @@ SUPABASE_AUDIO_BUCKET=
 SUPABASE_INPUT_PREFIX=
 SUPABASE_OUTPUT_PREFIX=processed
 
+WHISPER_MODEL=openai/whisper-small
+PRIVACY_REDACTION_ACTION=beep
+
 SMS_API_URL=
 SMS_API_KEY=
 SMS_RECIPIENT=
 ```
 
-`SUPABASE_URL`, `SUPABASE_KEY`, and `SUPABASE_AUDIO_BUCKET` are required to list
-recordings. The input prefix may be empty. SMS configuration is checked only when
-notification is reached; if it is incomplete, the completed processing/upload job
-is displayed with SMS marked `Skipped`.
+`PRIVACY_REDACTION_ACTION` accepts `beep` or `mute`. Supabase credentials are
+required for the dashboard. If SMS configuration is incomplete, processing and
+uploads still succeed and notification is shown as skipped.
 
-Use a server-side Supabase key with only the Storage permissions the application
-needs. The key and SMS bearer token are never rendered by the app. The bucket may
-remain private; no public-bucket shortcut is needed.
+Keep Supabase and SMS credentials server-side. They are never rendered by the UI,
+and the Storage bucket does not need to be public.
 
-The SMS endpoint receives:
-
-```json
-{
-  "to": "+...",
-  "message": "Audio processing completed.",
-  "job_id": "...",
-  "source_file": "incoming/example.mp3",
-  "processed_file": "processed/example/<job-id>/processed.mp3"
-}
-```
-
-with `Authorization: Bearer $SMS_API_KEY`. Provider-specific request changes belong
-only in `app/services/sms_client.py`.
-
-## Start the dashboard
-
-From the repository root:
+## Streamlit dashboard
 
 ```bash
 streamlit run app/dashboard.py
 ```
 
-Listing retrieves metadata only; it does not download every recording. Selecting
-one recording downloads it for preview. Processing, uploads, and SMS happen only
-after an explicit button click. Failed uploads and SMS calls have separate retry
-buttons, preventing Streamlit reruns from repeating earlier side effects.
+Listing retrieves metadata only. Selecting one recording downloads it for preview.
+Processing, uploads, and SMS happen only after an explicit button click. Upload and
+SMS failures have stage-specific retry buttons, preventing Streamlit reruns from
+duplicating earlier side effects.
 
-Each job uses a unique temporary directory and UUID. Uploaded objects use:
+Every processing attempt uses a unique temporary directory and UUID. Outputs are
+uploaded as:
 
 ```text
 processed/<source-stem>/<job-id>/processed.mp3
@@ -105,35 +103,45 @@ processed/<source-stem>/<job-id>/transcript.txt
 processed/<source-stem>/<job-id>/transcript.json
 ```
 
-Starting another job or clearing the current job removes the previous temporary
-workspace.
+`processed.mp3` contains the beeped or muted private-data ranges. `transcript.txt`
+contains the raw Whisper transcript. `transcript.json` contains the raw and redacted
+transcripts, detected entities, confidence scores, and audio redaction ranges. Treat
+the transcript artifacts as sensitive data and configure Supabase access policies
+accordingly.
 
-## Run tests
+## FastAPI service
+
+```bash
+uvicorn main:app --reload
+```
+
+Upload the included fixture:
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/sanitize \
+  -F 'audio=@test_audio.wav' \
+  -F 'action=beep'
+```
+
+Use `action=mute` to silence detected ranges. `POST /v1/sanitize` accepts MP3 and
+WAV uploads. `POST /v1/sanitize-url` accepts public/signed HTTP URLs and
+`supabase://bucket/object-key` sources. Successful responses provide endpoints for
+the sanitized audio, Whisper transcript, and privacy-filter result.
+
+## Tests
 
 ```bash
 pytest
 ```
 
-Tests use local temporary files and mock clients. They require no Supabase or SMS
-credentials.
+The unit tests use temporary files and mocked HTTP/Supabase/model clients. They do
+not require production credentials or model downloads.
 
-## Replacing the placeholder pipeline
-
-Replace this one function:
-
-```text
-app/services/pipeline_service.py::process_audio(input_path, output_dir)
-```
-
-Keep its signature and return a populated `ProcessingResult`. The implementation
-must create an output MP3 and any desired artifacts in the supplied output
-directory. For compatibility with the current uploader, retain artifacts named
-`processed.mp3`, `transcript.txt`, and `transcript.json`. Whisper, OpenAI
-speech-to-text, Deepgram, AssemblyAI, or a custom processor can then be introduced
-without rewriting the dashboard, Storage service, or SMS integration.
+Example output generated from `test_audio.wav` is available under
+`example_artifacts/`.
 
 ## Future persistence
 
-A future `processing_jobs` table can store the job ID, source/output paths, status,
-transcript, pipeline metadata, SMS status, timestamps, and error message. Database
-persistence is intentionally not required in this version.
+`JobState` currently lives in Streamlit session state. It can later map to a
+Supabase `processing_jobs` table containing the job ID, source/output paths, status,
+transcript, pipeline metadata, SMS status, timestamps, and error message.

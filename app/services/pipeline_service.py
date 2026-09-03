@@ -1,31 +1,31 @@
-"""Replaceable audio/transcription pipeline boundary."""
+"""Adapter between the dashboard and the audio privacy pipeline."""
 
 from __future__ import annotations
 
 import json
-import shutil
+import os
 from pathlib import Path
+from typing import Any
 
 from app.models.processing_result import ProcessingResult
 
 
-PLACEHOLDER_TRANSCRIPT = """Placeholder transcription.
+_PIPELINE: Any | None = None
 
-This recording has successfully passed through the demo transcription pipeline.
 
-Replace app/services/pipeline_service.py with the real transcription implementation.
-"""
+def _get_pipeline() -> Any:
+    """Load the large ML dependencies and models only when processing starts."""
+
+    global _PIPELINE
+    if _PIPELINE is None:
+        from privacy_pipeline import AudioPrivacyPipeline
+
+        _PIPELINE = AudioPrivacyPipeline()
+    return _PIPELINE
 
 
 def process_audio(input_path: Path, output_dir: Path) -> ProcessingResult:
-    """Run the placeholder pipeline and return its implementation-neutral result.
-
-    # TODO: Replace this placeholder implementation with the real
-    # transcription and audio-processing pipeline.
-
-    A future implementation should preserve this function signature and return a
-    populated :class:`ProcessingResult`; the dashboard needs no other changes.
-    """
+    """Transcribe, detect private data, and redact the matching audio spans."""
 
     input_path = Path(input_path)
     output_dir = Path(output_dir)
@@ -38,26 +38,32 @@ def process_audio(input_path: Path, output_dir: Path) -> ProcessingResult:
     output_audio_path = output_dir / "processed.mp3"
     transcript_txt_path = output_dir / "transcript.txt"
     transcript_json_path = output_dir / "transcript.json"
+    action = os.getenv("PRIVACY_REDACTION_ACTION", "beep").strip().lower()
+    if action not in {"beep", "mute"}:
+        raise ValueError("PRIVACY_REDACTION_ACTION must be 'beep' or 'mute'.")
 
-    shutil.copyfile(input_path, output_audio_path)
-
+    pipeline = _get_pipeline()
+    sanitized = pipeline.process_file(input_path, output_audio_path, action=action)
+    entities = [entity.model_dump() for entity in sanitized.entities]
+    redaction_ranges = [span.model_dump() for span in sanitized.audio_spans]
     metadata = {
-        "pipeline": "placeholder",
-        "language": "unknown",
-        "duration_seconds": None,
-        "segment_count": 1,
+        "pipeline": "whisper_privacy_filter",
+        "whisper_model": pipeline.whisper_model,
+        "privacy_model": "openai/privacy-filter",
+        "redaction_action": action,
+        "detected_entity_count": len(entities),
+        "redaction_range_count": len(redaction_ranges),
     }
-    transcript_txt_path.write_text(PLACEHOLDER_TRANSCRIPT, encoding="utf-8")
+    transcript_txt_path.write_text(sanitized.transcript + "\n", encoding="utf-8")
     transcript_json_path.write_text(
         json.dumps(
             {
-                "pipeline": "placeholder",
-                "transcript": PLACEHOLDER_TRANSCRIPT,
-                "metadata": {
-                    "language": "unknown",
-                    "duration_seconds": None,
-                    "segment_count": 1,
-                },
+                "pipeline": "whisper_privacy_filter",
+                "transcript": sanitized.transcript,
+                "redacted_transcript": sanitized.redacted_transcript,
+                "metadata": metadata,
+                "entities": entities,
+                "redaction_ranges": redaction_ranges,
             },
             indent=2,
             ensure_ascii=False,
@@ -67,12 +73,10 @@ def process_audio(input_path: Path, output_dir: Path) -> ProcessingResult:
     )
 
     return ProcessingResult(
-        transcript=PLACEHOLDER_TRANSCRIPT,
+        transcript=sanitized.redacted_transcript,
         input_audio_path=input_path,
         output_audio_path=output_audio_path,
         metadata=metadata,
         artifacts=[transcript_txt_path, transcript_json_path],
-        warnings=[
-            "This is demo output from the placeholder pipeline, not a real transcription."
-        ],
+        warnings=[],
     )

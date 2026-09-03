@@ -186,7 +186,7 @@ def _start_job(
 
             try:
                 job.status = "processing"
-                st.write("Running placeholder pipeline")
+                st.write("Running Whisper and privacy-filter pipeline")
                 result = process_audio(input_path, work_dir / "output")
                 st.write("Generating artifacts")
                 for expected in [result.output_audio_path, *result.artifacts]:
@@ -318,7 +318,8 @@ def _render_job(job: JobState) -> None:
 
     with processed:
         st.markdown("#### Processed")
-        st.info("Pipeline: Placeholder")
+        pipeline_name = str(job.pipeline_metadata.get("pipeline", "Unknown"))
+        st.info(f"Pipeline: {pipeline_name.replace('_', ' ').title()}")
         st.write("**Output filename:** `processed.mp3`")
         if job.uploaded_output_path:
             st.write(f"**Output storage path:** `{job.uploaded_output_path}`")
@@ -373,11 +374,11 @@ def main() -> None:
 
     st.title("MP3 Transcription Workflow")
     st.caption(
-        "Supabase Storage → placeholder audio/transcription pipeline → uploads → SMS"
+        "Supabase Storage → privacy-aware transcription pipeline → uploads → SMS"
     )
-    st.warning(
-        "This application currently uses a placeholder pipeline. It copies the audio "
-        "and generates demo transcript text; it does not perform speech recognition."
+    st.info(
+        "The processing pipeline uses Whisper for transcription, openai/privacy-filter "
+        "for private-data detection, and FFmpeg to redact matching audio spans."
     )
 
     try:
